@@ -2,9 +2,24 @@
 
 import asyncio
 import heapq
+import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
+
+# Maximum consecutive failures before a job is considered "poison"
+POISON_THRESHOLD = 3
+
+# Exponential backoff base delay in seconds
+BACKOFF_BASE = 2.0
+
+# Maximum backoff delay (cap at 5 minutes)
+BACKOFF_MAX = 300.0
+
+# Maximum redelivery rate per queue (jobs per second)
+MAX_REDELIVERY_RATE = 10
 
 
 class PriorityQueue:
@@ -31,17 +46,46 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(self, max_retries: int = 3):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
-        self._max_retries = 3
+        self._max_retries = max_retries
+        # Poison job tracking
+        self._poison_jobs: Dict[str, Dict] = {}  # task_id -> poison info
+        self._dead_letter: List[Dict] = []
+        # Redelivery throttling
+        self._redelivery_timestamps: Dict[str, List[float]] = {}  # queue -> [timestamps]
+
+    def _compute_backoff(self, retries: int) -> float:
+        """Compute exponential backoff delay for retry."""
+        delay = BACKOFF_BASE * (2 ** retries)
+        return min(delay, BACKOFF_MAX)
+
+    def _is_throttled(self, queue: str) -> bool:
+        """Check if redelivery is throttled for this queue."""
+        now = time.time()
+        if queue not in self._redelivery_timestamps:
+            self._redelivery_timestamps[queue] = []
+
+        # Keep only timestamps from the last second
+        self._redelivery_timestamps[queue] = [
+            t for t in self._redelivery_timestamps[queue] if now - t < 1.0
+        ]
+
+        return len(self._redelivery_timestamps[queue]) >= MAX_REDELIVERY_RATE
+
+    def _record_redelivery(self, queue: str) -> None:
+        """Record a redelivery event for throttling."""
+        if queue not in self._redelivery_timestamps:
+            self._redelivery_timestamps[queue] = []
+        self._redelivery_timestamps[queue].append(time.time())
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
         task["id"] = task_id
         task["enqueued_at"] = time.time()
-        task["retries"] = 0
+        task["retries"] = task.get("retries", 0)
 
         if queue not in self._queues:
             self._queues[queue] = PriorityQueue()
@@ -70,147 +114,87 @@ class TaskScheduler:
         return None
 
     def complete(self, task_id: str) -> bool:
+        # Clear poison job tracking on success
+        self._poison_jobs.pop(task_id, None)
         return self._in_flight.pop(task_id, None) is not None
 
     def fail(self, task_id: str, queue: str = "default") -> bool:
+        """Handle task failure with poison job throttling and exponential backoff.
+
+        - Tracks consecutive failures per task
+        - Applies exponential backoff before re-enqueueing
+        - Moves to dead letter queue after max retries
+        - Throttles redelivery rate to prevent worker crash loops
+        """
         task = self._in_flight.pop(task_id, None)
-        if task:
-            task["retries"] += 1
-            if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
-                return True
-        return False
-
-# 2019-04-25T08:37:12 update
-
-# 2019-06-04T16:40:00 update
-
-# 2019-07-11T12:01:28 update
-
-# 2019-08-02T12:20:21 update
-
-# 2019-08-23T10:38:50 update
-
-# 2019-10-31T13:55:52 update
-
-# 2019-11-04T20:12:32 update
-
-# 2019-12-13T12:22:36 update
-
-# 2020-02-01T10:32:37 update
-
-# 2020-02-26T09:44:38 update
-
-# 2020-03-09T19:00:55 update
-
-# 2020-05-01T18:40:34 update
-
-# 2020-05-12T15:10:31 update
-
-# 2020-06-30T13:24:19 update
-
-# 2020-09-22T16:00:45 update
-
-# 2020-10-20T10:52:48 update
-
-# 2020-10-21T12:18:08 update
-
-# 2020-11-06T12:35:01 update
-
-# 2020-12-09T08:09:33 update
-
-# 2021-01-07T08:20:36 update
-
-# 2021-10-02T15:23:16 update
-
-# 2021-10-06T16:14:57 update
-
-# 2021-10-06T09:27:41 update
-
-# 2021-11-19T08:37:40 update
-
-# 2022-03-01T16:39:54 update
-
-# 2022-05-26T13:43:07 update
-
-# 2022-06-02T10:50:58 update
-
-# 2022-06-14T10:46:48 update
-
-# 2022-07-31T16:44:34 update
-
-# 2022-08-30T18:20:12 update
-
-# 2022-11-04T14:47:03 update
-
-# 2022-12-06T10:36:49 update
-
-# 2022-12-22T13:21:12 update
-
-# 2022-12-26T12:24:50 update
-
-# 2023-03-09T08:09:55 update
-
-# 2023-05-01T10:07:37 update
-
-# 2023-06-08T14:32:15 update
-
-# 2023-07-14T17:24:18 update
-
-# 2023-12-14T08:38:31 update
-
-# 2024-02-20T13:43:58 update
-
-# 2024-03-24T08:52:42 update
-
-# 2024-03-28T15:27:17 update
-
-# 2024-03-29T18:10:33 update
-
-# 2024-04-15T20:18:31 update
-
-# 2024-05-27T13:11:52 update
-
-# 2024-05-27T16:42:56 update
-
-# 2024-06-20T13:03:45 update
-
-# 2024-06-28T12:32:58 update
-
-# 2024-07-10T14:10:16 update
-
-# 2024-07-26T14:18:59 update
-
-# 2024-08-12T08:21:05 update
-
-# 2024-08-21T16:58:40 update
-
-# 2024-09-27T19:54:30 update
-
-# 2024-10-21T13:47:42 update
-
-# 2024-11-11T09:19:27 update
-
-# 2024-12-24T08:23:41 update
-
-# 2025-02-14T10:35:15 update
-
-# 2025-03-31T18:09:40 update
-
-# 2025-06-21T17:32:49 update
-
-# 2025-07-21T16:52:28 update
-
-# 2025-08-20T19:45:16 update
-
-# 2025-11-04T18:54:24 update
-
-# 2025-12-09T20:17:36 update
-
-# 2026-01-12T15:42:32 update
-
-# 2026-01-23T14:41:20 update
-
-# 2026-03-18T14:43:07 update
-
-# 2026-04-13T11:43:19 update
+        if not task:
+            return False
+
+        task["retries"] = task.get("retries", 0) + 1
+        retries = task["retries"]
+
+        # Track poison jobs
+        if task_id not in self._poison_jobs:
+            self._poison_jobs[task_id] = {
+                "first_failure": time.time(),
+                "consecutive_failures": 0,
+            }
+        self._poison_jobs[task_id]["consecutive_failures"] += 1
+        self._poison_jobs[task_id]["last_failure"] = time.time()
+
+        # Check if exceeded max retries — move to dead letter
+        if retries >= self._max_retries:
+            self._dead_letter.append({
+                **task,
+                "failed_at": time.time(),
+                "total_retries": retries,
+                "reason": "max_retries_exceeded",
+            })
+            self._poison_jobs.pop(task_id, None)
+            logger.warning(
+                "Task %s moved to dead letter queue after %d retries",
+                task_id, retries
+            )
+            return False
+
+        # Check redelivery throttle to prevent worker crash loops
+        if self._is_throttled(queue):
+            logger.info(
+                "Redelivery throttled for queue '%s': rate limit exceeded. "
+                "Deferring task %s (retry %d/%d)",
+                queue, task_id, retries, self._max_retries
+            )
+            # Schedule delayed retry with backoff
+            backoff = self._compute_backoff(retries)
+            task["next_retry_at"] = time.time() + backoff
+            self._scheduled[task_id] = time.time() + backoff
+            return True
+
+        # Apply exponential backoff — schedule delayed retry
+        backoff = self._compute_backoff(retries)
+        task["next_retry_at"] = time.time() + backoff
+        self._scheduled[task_id] = time.time() + backoff
+        self._record_redelivery(queue)
+
+        logger.info(
+            "Task %s failed (retry %d/%d), scheduled retry after %.1fs backoff",
+            task_id, retries, self._max_retries, backoff
+        )
+        return True
+
+    def get_dead_letter(self) -> List[Dict]:
+        """Return and clear the dead letter queue."""
+        dead = self._dead_letter
+        self._dead_letter = []
+        return dead
+
+    def get_poison_jobs(self) -> Dict[str, Dict]:
+        """Return current poison job tracking info."""
+        return dict(self._poison_jobs)
+
+    def is_poison_job(self, task_id: str) -> bool:
+        """Check if a task is flagged as a poison job."""
+        info = self._poison_jobs.get(task_id)
+        if info is None:
+            return False
+        return info["consecutive_failures"] >= POISON_THRESHOLD
