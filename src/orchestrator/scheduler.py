@@ -1,6 +1,8 @@
 """Task Scheduler — Priority-based task queuing and dispatch."""
 
 import asyncio
+import logging
+logger = logging.getLogger(__name__)
 import heapq
 import time
 from typing import Any, Dict, Optional
@@ -31,11 +33,14 @@ class PriorityQueue:
 
 
 class TaskScheduler:
-    def __init__(self):
+    def __init__(self, max_retries: int = 3, base_retry_delay: float = 1.0, max_retry_delay: float = 60.0):
         self._queues: Dict[str, PriorityQueue] = {}
         self._scheduled: Dict[str, float] = {}
         self._in_flight: Dict[str, Dict] = {}
-        self._max_retries = 3
+        self._dead_letter: List[Dict] = []
+        self._max_retries = max_retries
+        self._base_retry_delay = base_retry_delay
+        self._max_retry_delay = max_retry_delay
 
     def enqueue(self, task: Dict, queue: str = "default", priority: int = 0) -> str:
         task_id = str(uuid4())
@@ -75,11 +80,42 @@ class TaskScheduler:
     def fail(self, task_id: str, queue: str = "default") -> bool:
         task = self._in_flight.pop(task_id, None)
         if task:
-            task["retries"] += 1
-            if task["retries"] < self._max_retries:
-                self.enqueue(task, queue, priority=task.get("priority", 0))
-                return True
+            task["retries"] = task.get("retries", 0) + 1
+            if task["retries"] >= self._max_retries:
+                # Move to dead-letter queue after max retries (poison job)
+                task["dead_lettered_at"] = time.time()
+                task["dead_letter_reason"] = f"Max retries ({self._max_retries}) exceeded"
+                self._dead_letter.append(task)
+                logger.warning(
+                    "Task %s moved to dead-letter queue after %d retries",
+                    task_id, task["retries"],
+                )
+                return False
+            # Exponential backoff with jitter to throttle poison job redelivery
+            delay = min(
+                self._base_retry_delay * (2 ** (task["retries"] - 1)),
+                self._max_retry_delay,
+            )
+            task["next_retry_at"] = time.time() + delay
+            task["retry_delay"] = delay
+            logger.info(
+                "Task %s failed (retry %d/%d), redelivering in %.1fs",
+                task_id, task["retries"], self._max_retries, delay,
+            )
+            self.schedule(task, delay, queue, priority=task.get("priority", 0))
+            return True
         return False
+
+
+    def get_dead_letter(self) -> List[Dict]:
+        """Return tasks that exceeded max retries (poison jobs)."""
+        return list(self._dead_letter)
+
+    def purge_dead_letter(self) -> int:
+        """Remove and return count of dead-lettered tasks."""
+        count = len(self._dead_letter)
+        self._dead_letter.clear()
+        return count
 
 # 2019-04-25T08:37:12 update
 
