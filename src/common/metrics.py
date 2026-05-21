@@ -22,6 +22,11 @@ class MetricsCollector:
         with self._lock:
             self._gauges[metric] = value
 
+    def active_timer_count(self) -> int:
+        """Return the number of currently active (started but not stopped) timers."""
+        with self._lock:
+            return len(self._timers)
+
     def observe(self, metric: str, value: float) -> None:
         with self._lock:
             self._histograms[metric].append(value)
@@ -45,6 +50,7 @@ class MetricsCollector:
                 "gauges": dict(self._gauges),
                 "histograms": {k: {"count": len(v), "sum": sum(v), "avg": sum(v) / len(v) if v else 0}
                                for k, v in self._histograms.items()},
+                "active_timers": len(self._timers),
             }
 
 
