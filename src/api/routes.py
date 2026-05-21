@@ -54,6 +54,107 @@ async def stop_agent(agent_id: str):
 async def agent_count():
     return {"count": registry.count()}
 
+# ============================================================
+# Artifact Ingestion Routes — with max body size enforcement
+# ============================================================
+
+# Maximum allowed artifact upload size (10 MB)
+MAX_ARTIFACT_SIZE = 10 * 1024 * 1024  # 10 MB in bytes
+
+
+def _validate_artifact_size(content_length: int) -> None:
+    """Validate artifact size before processing.
+
+    This guard runs early in the request lifecycle to prevent
+    oversized payloads from reaching the service layer, avoiding
+    unnecessary resource consumption and potential DoS.
+
+    Raises:
+        HTTPException: 413 if content exceeds MAX_ARTIFACT_SIZE.
+    """
+    if content_length is not None and content_length > MAX_ARTIFACT_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Artifact upload exceeds maximum allowed size of {MAX_ARTIFACT_SIZE // (1024 * 1024)}MB"
+        )
+
+
+@router.post("/artifacts/upload")
+async def upload_artifact(
+    filename: str,
+    content: str,
+    content_length: int = None,
+    content_type: str = "application/octet-stream"
+):
+    """Upload an artifact with enforced max body size validation.
+
+    The size guard is applied before any state mutation or data dispatch,
+    ensuring fails-closed behavior for oversized uploads.
+    """
+    # Enforce max body size BEFORE any processing
+    effective_length = content_length if content_length is not None else len(content.encode())
+    _validate_artifact_size(effective_length)
+
+    # Validate content type
+    allowed_types = {
+        "application/json",
+        "application/octet-stream",
+        "text/plain",
+        "application/xml",
+        "application/zip",
+    }
+    if content_type not in allowed_types:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported content type: {content_type}"
+        )
+
+    # Validate filename
+    if not filename or len(filename) > 255:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid filename: must be between 1 and 255 characters"
+        )
+
+    # All validation passed — safe to proceed with ingestion
+    return {
+        "status": "accepted",
+        "filename": filename,
+        "size": effective_length,
+        "content_type": content_type,
+    }
+
+
+@router.post("/artifacts/batch")
+async def batch_upload_artifacts(
+    artifacts: List[Dict]
+):
+    """Batch upload artifacts with per-item size enforcement.
+
+    Each artifact in the batch is validated individually before processing.
+    If any single artifact exceeds the size limit, the entire batch is rejected
+    with a 413 response — fails closed before any mutation.
+    """
+    if not artifacts:
+        raise HTTPException(status_code=400, detail="Empty batch")
+
+    # Validate ALL items before processing any
+    for i, artifact in enumerate(artifacts):
+        content = artifact.get("content", "")
+        content_length = artifact.get("content_length", len(content.encode()))
+        _validate_artifact_size(content_length)
+
+        if not artifact.get("filename"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Artifact at index {i} missing required 'filename' field"
+            )
+
+    return {
+        "status": "accepted",
+        "count": len(artifacts),
+    }
+
 # 2019-03-18T11:10:18 update
 
 # 2019-04-22T13:58:05 update
