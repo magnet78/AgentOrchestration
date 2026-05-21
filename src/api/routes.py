@@ -1,6 +1,8 @@
 """API route definitions."""
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Response, Header
+from typing import List, Dict, Optional
+from starlette.status import HTTP_412_PRECONDITION_FAILED
 from typing import List, Dict, Optional
 
 from src.agent import AgentRegistry, AgentStatus
@@ -53,6 +55,44 @@ async def stop_agent(agent_id: str):
 @router.get("/agents/count")
 async def agent_count():
     return {"count": registry.count()}
+
+
+@router.get("/agents/{agent_id}/config")
+async def get_agent_config(agent_id: str, response: Response):
+    """Get agent config with ETag for optimistic concurrency."""
+    agent = registry.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    etag = registry._compute_etag(agent.get("config", {}))
+    response.headers["ETag"] = etag
+    return {"config": agent.get("config", {}), "etag": etag}
+
+
+@router.put("/agents/{agent_id}/config")
+async def update_agent_config(
+    agent_id: str,
+    config: Dict,
+    response: Response,
+    if_match: Optional[str] = Header(None, alias="If-Match"),
+):
+    """Update agent config with ETag validation (optimistic concurrency control).
+
+    Clients must include the ETag from a previous GET in the If-Match header.
+    Returns 412 Precondition Failed if the ETag does not match (stale data).
+    """
+    result = registry.update_config(agent_id, config, if_match=if_match)
+    if result is None:
+        if if_match is not None:
+            raise HTTPException(
+                status_code=HTTP_412_PRECONDITION_FAILED,
+                detail="ETag mismatch: the agent config has been modified by another client. Please refresh and retry.",
+            )
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    etag = registry._compute_etag(result.get("config", {}))
+    response.headers["ETag"] = etag
+    response.headers["X-Config-Version"] = str(result.get("updated_at", 0))
+    return {"config": result.get("config", {}), "etag": etag, "updated_at": result.get("updated_at")}
 
 # 2019-03-18T11:10:18 update
 
