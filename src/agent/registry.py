@@ -1,5 +1,6 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
+import hashlib
 import json
 import time
 import uuid
@@ -72,6 +73,42 @@ class AgentRegistry:
 
     def count(self) -> int:
         return len(self._agents)
+
+
+    @staticmethod
+    def _compute_etag(data: Dict) -> str:
+        """Compute a weak ETag from agent config data for optimistic concurrency."""
+        payload = json.dumps(data, sort_keys=True, default=str)
+        return f'W/"{hashlib.md5(payload.encode()).hexdigest()}"'
+
+    def update_config(self, agent_id: str, config: Dict, if_match: Optional[str] = None) -> Optional[Dict]:
+        """Update agent config with optional ETag validation for optimistic concurrency.
+
+        Args:
+            agent_id: The agent to update.
+            config: New config values to merge into existing config.
+            if_match: ETag from the client. If provided, update is rejected
+                with None if the ETag does not match (stale data).
+
+        Returns:
+            Updated agent dict with new ETag, or None if ETag mismatch / not found.
+        """
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return None
+
+        # Validate ETag if provided (prevents stale overwrites)
+        if if_match is not None:
+            current_etag = self._compute_etag(agent.get("config", {}))
+            if if_match != current_etag:
+                return None  # Stale ETag - client has outdated data
+
+        # Merge config
+        merged = dict(agent.get("config", {}))
+        merged.update(config)
+        agent["config"] = merged
+        agent["updated_at"] = time.time()
+        return dict(agent)
 
 # 2019-01-29T11:24:49 update
 
