@@ -23,6 +23,13 @@ class AgentExecutor:
             try:
                 result = await task_obj
                 self._results[execution_id] = result
+            except asyncio.CancelledError:
+                self._results[execution_id] = {
+                    "status": "cancelled",
+                    "reason": "Execution was cancelled by caller",
+                    "cancelled_at": time.time(),
+                }
+                raise
             except Exception as e:
                 self._results[execution_id] = {"error": str(e)}
             finally:
@@ -48,6 +55,12 @@ class AgentExecutor:
     def cancel(self, execution_id: str) -> bool:
         task = self._active_tasks.get(execution_id)
         if task and not task.done():
+            # Store cancellation result so polling clients don't wait forever
+            self._results[execution_id] = {
+                "status": "cancelling",
+                "reason": "Cancellation requested",
+                "cancelled_at": time.time(),
+            }
             task.cancel()
             return True
         return False
