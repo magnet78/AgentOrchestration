@@ -16,11 +16,23 @@ class ResourceLimits:
 
 class AgentSandbox:
     def __init__(self, base_path: Optional[str] = None):
-        self.base_path = Path(base_path or tempfile.mkdtemp(prefix="ao_sandbox_"))
+        raw_path = base_path or tempfile.mkdtemp(prefix="ao_sandbox_")
+        self.base_path = Path(raw_path).resolve()
         self._sandboxes: Dict[str, Path] = {}
+        self._base_path_parent = self.base_path.parent.resolve()
+
+    def _validate_path(self, path: Path) -> None:
+        """Ensure a resolved path stays within the sandbox base directory."""
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.base_path)
+        except ValueError:
+            raise ValueError(f"Path {resolved} escapes sandbox base {self.base_path}")
 
     def create(self, agent_id: str, limits: Optional[ResourceLimits] = None) -> Path:
         sandbox_path = self.base_path / agent_id
+        # Resolve and validate path boundary before creating
+        self._validate_path(sandbox_path)
         sandbox_path.mkdir(parents=True, exist_ok=True)
         self._sandboxes[agent_id] = sandbox_path
         return sandbox_path
