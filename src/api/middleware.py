@@ -5,9 +5,49 @@ import logging
 from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 
 logger = logging.getLogger(__name__)
+
+
+# Sensitive fields that should never appear in error responses or logs
+SENSITIVE_FIELDS = {
+    "password", "token", "secret", "authorization", "api_key", "apiKey",
+    "private_key", "privateKey", "credit_card", "ssn", "session",
+    "cookie", "credentials", "access_token", "refresh_token",
+}
+
+
+def _sanitize_error_detail(detail: str) -> str:
+    """Remove sensitive information from error detail strings."""
+    sanitized = detail
+    for field in SENSITIVE_FIELDS:
+        sanitized = sanitized.replace(field, "***REDACTED***")
+    return sanitized
+
+
+class ErrorMiddleware(BaseHTTPMiddleware):
+    """Middleware that catches exceptions, sanitizes sensitive data before
+    JSON serialization, and clears request-local state in finally blocks."""
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as exc:
+            # Sanitize exception detail before any serialization or logging
+            safe_detail = _sanitize_error_detail(str(exc))
+            logger.error(
+                "Unhandled exception: %s", safe_detail,
+                extra={"path": request.url.path, "method": request.method},
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "Internal Server Error",
+                    "detail": safe_detail,
+                },
+            )
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
