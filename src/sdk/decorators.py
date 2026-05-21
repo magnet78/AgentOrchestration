@@ -17,10 +17,18 @@ def task(name: Optional[str] = None, retries: int = 0, timeout: int = 300):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             try:
-                result = await asyncio.wait_for(
-                    func(*args, **kwargs),
-                    timeout=timeout,
-                )
+                if asyncio.iscoroutinefunction(func):
+                    result = await asyncio.wait_for(
+                        func(*args, **kwargs),
+                        timeout=timeout,
+                    )
+                else:
+                    # Sync function: run in executor to avoid blocking the event loop
+                    loop = asyncio.get_event_loop()
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(None, lambda: func(*args, **kwargs)),
+                        timeout=timeout,
+                    )
                 return result
             except asyncio.TimeoutError:
                 raise TimeoutError(f"Task {name or func.__name__} timed out after {timeout}s")
