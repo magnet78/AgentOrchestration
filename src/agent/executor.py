@@ -23,7 +23,9 @@ class AgentExecutor:
             try:
                 result = await task_obj
                 self._results[execution_id] = result
-            except Exception as e:
+            except asyncio.CancelledError:
+                self._results[execution_id] = {"status": "cancelled", "message": "Execution was cancelled"}
+        except Exception as e:
                 self._results[execution_id] = {"error": str(e)}
             finally:
                 self._active_tasks.pop(execution_id, None)
