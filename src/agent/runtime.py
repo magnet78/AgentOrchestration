@@ -22,6 +22,7 @@ class AgentRuntime:
     def __init__(self):
         self._processes: Dict[str, subprocess.Popen] = {}
         self._states: Dict[str, RuntimeState] = {}
+        self._log_files: Dict[str, tuple] = {}
 
     def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
         if agent_id in self._processes and self._processes[agent_id].poll() is None:
@@ -35,13 +36,19 @@ class AgentRuntime:
         process_env["AO_AGENT_ID"] = agent_id
 
         try:
+            log_dir = os.path.join(os.environ.get("AO_LOG_DIR", "/tmp"), "agents")
+            os.makedirs(log_dir, exist_ok=True)
+            stdout_file = open(os.path.join(log_dir, f"{agent_id}.stdout.log"), "a")
+            stderr_file = open(os.path.join(log_dir, f"{agent_id}.stderr.log"), "a")
+
             proc = subprocess.Popen(
                 command,
                 env=process_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=stdout_file,
+                stderr=stderr_file,
             )
             self._processes[agent_id] = proc
+            self._log_files[agent_id] = (stdout_file, stderr_file)
             self._states[agent_id] = RuntimeState.RUNNING
             logger.info(f"Agent {agent_id} started (PID: {proc.pid})")
             return True
@@ -62,6 +69,15 @@ class AgentRuntime:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+        # Close log files to prevent resource leaks
+        log_files = self._log_files.pop(agent_id, None)
+        if log_files:
+            for f in log_files:
+                try:
+                    f.close()
+                except Exception:
+                    pass
 
         self._states[agent_id] = RuntimeState.STOPPED
         logger.info(f"Agent {agent_id} stopped")
