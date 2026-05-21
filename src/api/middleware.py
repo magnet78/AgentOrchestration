@@ -1,11 +1,13 @@
 """API middleware components."""
 
+import json
 import time
 import logging
 from typing import Callable
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,45 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         duration = time.time() - start
         logger.info(f"{request.method} {request.url.path} {response.status_code} {duration:.3f}s")
         return response
+
+class ErrorMiddleware(BaseHTTPMiddleware):
+    """Sanitize exception details before JSON serialization to prevent
+    leaking sensitive internal operational metadata in error responses."""
+    
+    # Fields that should never appear in error responses
+    SENSITIVE_FIELDS = {
+        "stack_trace", "traceback", "internal_error", "debug_info",
+        "memory_address", "pid", "worker_id", "internal_path",
+        "raw_request", "session_id", "auth_token", "api_key",
+    }
+    
+    @staticmethod
+    def _sanitize_detail(detail: object) -> object:
+        """Remove sensitive fields from exception details before serialization."""
+        if isinstance(detail, dict):
+            return {
+                k: ErrorMiddleware._sanitize_detail(v)
+                for k, v in detail.items()
+                if k.lower() not in ErrorMiddleware.SENSITIVE_FIELDS
+            }
+        elif isinstance(detail, (list, tuple)):
+            return [ErrorMiddleware._sanitize_detail(item) for item in detail]
+        return detail
+    
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        try:
+            return await call_next(request)
+        except Exception as exc:
+            detail = str(exc) if not isinstance(exc, HTTPException) else exc.detail
+            sanitized = self._sanitize_detail(detail) if isinstance(detail, (dict, list)) else detail
+            status_code = exc.status_code if isinstance(exc, HTTPException) else 500
+            logger.error(f"Request error: {request.method} {request.url.path} -> {status_code}")
+            return Response(
+                status_code=status_code,
+                content=json.dumps({"error": str(sanitized)}),
+                media_type="application/json",
+            )
+
 
 # 2019-03-01T18:35:19 update
 
