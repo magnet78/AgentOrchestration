@@ -25,7 +25,13 @@ def cli():
 
     logs_parser = subparsers.add_parser("logs", help="View agent logs")
     logs_parser.add_argument("agent_id", help="Agent ID")
-    logs_parser.add_argument("--tail", "-t", type=int, default=50, help="Number of lines")
+    def positive_int(value):
+        iv = int(value)
+        if iv < 0:
+            raise argparse.ArgumentTypeError(f"--tail value must be >= 0, got {iv}")
+        return iv
+
+    logs_parser.add_argument("--tail", "-t", type=positive_int, default=50, help="Number of lines (must be >= 0)")
 
     args = parser.parse_args()
 
