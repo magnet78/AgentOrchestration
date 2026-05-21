@@ -22,6 +22,7 @@ class AgentRuntime:
     def __init__(self):
         self._processes: Dict[str, subprocess.Popen] = {}
         self._states: Dict[str, RuntimeState] = {}
+        self._failure_reasons: Dict[str, str] = {}
 
     def start(self, agent_id: str, command: list, env: Optional[Dict] = None) -> bool:
         if agent_id in self._processes and self._processes[agent_id].poll() is None:
@@ -47,6 +48,7 @@ class AgentRuntime:
             return True
         except Exception as e:
             self._states[agent_id] = RuntimeState.CRASHED
+            self._failure_reasons[agent_id] = str(e)
             logger.error(f"Failed to start agent {agent_id}: {e}")
             return False
 
@@ -60,6 +62,8 @@ class AgentRuntime:
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            self._failure_reasons[agent_id] = f"Shutdown timed out after {timeout}s (SIGKILL sent)"
+            logger.warning(f"Agent {agent_id} did not stop in {timeout}s, sending SIGKILL")
             proc.kill()
             proc.wait()
 
@@ -71,7 +75,15 @@ class AgentRuntime:
         proc = self._processes.get(agent_id)
         if proc and proc.poll() is not None:
             self._states[agent_id] = RuntimeState.CRASHED
+            if agent_id not in self._failure_reasons:
+                return_code = proc.returncode
+                self._failure_reasons[agent_id] = f"Process exited with code {return_code}"
+                logger.warning(f"Agent {agent_id} crashed (exit code: {return_code})")
         return self._states.get(agent_id, RuntimeState.STOPPED)
+
+    def get_failure_reason(self, agent_id: str) -> Optional[str]:
+        """Get the recorded failure reason for a crashed or stopped agent."""
+        return self._failure_reasons.get(agent_id)
 
     def is_running(self, agent_id: str) -> bool:
         proc = self._processes.get(agent_id)
