@@ -1,5 +1,6 @@
 """Agent Registry — Manages agent lifecycle and metadata."""
 
+import hashlib
 import json
 import time
 import uuid
@@ -25,12 +26,17 @@ class AgentRegistry:
     def register(self, name: str, agent_type: str, config: Optional[Dict] = None) -> str:
         agent_id = str(uuid.uuid4())
         timestamp = time.time()
+        initial_config = config or {}
+        initial_etag = hashlib.md5(
+            (json.dumps(initial_config, sort_keys=True) + agent_id).encode()
+        ).hexdigest()
         self._agents[agent_id] = {
             "id": agent_id,
             "name": name,
             "type": agent_type,
             "status": AgentStatus.PENDING.value,
-            "config": config or {},
+            "config": initial_config,
+            "config_etag": initial_etag,
             "created_at": timestamp,
             "updated_at": timestamp,
             "version": "1.0.0",
@@ -69,6 +75,63 @@ class AgentRegistry:
         if group in self._index and agent_id in self._index[group]:
             self._index[group].remove(agent_id)
         return True
+
+    def _compute_etag(self, agent_id: str, config: Dict) -> str:
+        """Compute ETag for agent config using content hash.
+
+        Returns a weak ETag suitable for optimistic concurrency control.
+        """
+        content = json.dumps(config, sort_keys=True) + agent_id
+        return hashlib.md5(content.encode()).hexdigest()
+
+    def update_config(self, agent_id: str, new_config: Dict, etag: Optional[str] = None) -> Dict[str, Any]:
+        """Update agent config with ETag-based optimistic locking.
+
+        Prevents stale ETag overwrites by validating the provided ETag
+        against the current config hash before applying changes.
+
+        Args:
+            agent_id: The agent to update.
+            new_config: New configuration to apply.
+            etag: Current ETag from the client. If provided and mismatched,
+                  the update is rejected with a 412 Precondition Failed error.
+
+        Returns:
+            Updated agent dict with new ETag.
+
+        Raises:
+            ValueError: If agent not found or ETag mismatch.
+        """
+        if agent_id not in self._agents:
+            raise ValueError(f"Agent {agent_id} not found")
+
+        agent = self._agents[agent_id]
+
+        # ETag validation — prevent stale overwrites
+        if etag is not None:
+            current_etag = agent.get("config_etag")
+            if current_etag != etag:
+                raise ValueError(
+                    f"ETag mismatch: expected '{etag}', got '{current_etag}'. "
+                    "Config has been modified by another client. "
+                    "Please refresh and retry."
+                )
+
+        # Merge config (shallow merge)
+        merged_config = {**agent.get("config", {}), **new_config}
+        agent["config"] = merged_config
+        agent["updated_at"] = time.time()
+
+        # Compute new ETag
+        new_etag = self._compute_etag(agent_id, merged_config)
+        agent["config_etag"] = new_etag
+
+        return {
+            "agent_id": agent_id,
+            "config": merged_config,
+            "etag": new_etag,
+            "updated_at": agent["updated_at"],
+        }
 
     def count(self) -> int:
         return len(self._agents)
